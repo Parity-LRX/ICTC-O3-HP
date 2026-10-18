@@ -23,8 +23,7 @@ cd ICTC-O3-HP
 python -m pip install -e '.[hp,train]'
 ```
 
-Cloning this private repository requires authorized GitHub access. The
-validated runtime includes PyTorch 2.7.1 with CUDA, Triton 3.3.1, and e3nn
+The validated runtime includes PyTorch 2.7.1 with CUDA, Triton 3.3.1, and e3nn
 0.5.9. CUDA tensor-product JIT compilation also requires a compatible CUDA
 toolkit, C++ compiler, and Ninja. Avoid installing different `mace_ictc`
 checkouts into the same environment.
