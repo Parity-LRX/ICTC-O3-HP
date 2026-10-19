@@ -4,6 +4,11 @@
 `models/` 里的 `_source`、`_plan`、原始 CUDA launch 等内部函数无需由用户调用。
 性能对照、测试与验证资料由维护者本地保存，不包含在交付源码和安装包中。
 
+论文对应的 package 版本号保持 0.2.12，不因本轮优化而改号。本轮提供 CHORUS
+所需的 HP API contract 1；CHORUS 的 `[hp]` extra 精确锁定对应 Git 提交，
+而不是仅靠相同版本号区分新旧实现。distribution 名为 `ictc-o3-hp`，导入 namespace
+仍为 `mace_ictc`。为避免双包安装时命令互相覆盖，CLI 统一使用 `ictc-hp-*` 前缀。
+
 ## API 一览
 
 | API | 用途 | 输入 / 输出要点 |
@@ -11,12 +16,17 @@
 | `EdgeTensorProduct.create(...)` | 新建独立边 TP | 任意正整数 C、CUDA FP32、非负 L、自然宇称、单位固定基础系数 |
 | `EdgeTensorProduct(tp, ...)` | 包装已有 ICTC TP | 保留已有固定系数、路径和外部门控约定 |
 | `GraphMessage(tp, ...)` | 真实图 gather/TP/gate/scatter | 接收节点/边 degree 字典、门控和重复 src/dst，返回节点路径块 |
+| `CoherentGraphMessage(tp, ..., mixed_threads=0)` | 中性/实/虚三流联合消息与训练伴随 | 混合核仅专门化求导依赖，不固定输入；线程、邻居与节点归约调度候选见下文 |
 | `PackedGraphMessage(tp, ...)` / `.create(...)` | 原生 packed 图 TP | 与 `EdgeTensorProduct(ir_mul)` 同布局；直接接收/返回二维缓冲及实时 src/dst |
 | `direction_harmonics(n, L, policy=...)` | 笛卡尔方向谐波 | 单位方向 `[E,3]` -> 各阶 `[E,2l+1]` 的列表 |
 | `configure_symmetric_contraction(sc, ...)` | 启用已有 SC 的高性能分解 | 原地选择执行路径；forward 继续使用原模块接口 |
 | `create_symmetric_contraction(...)` | 新建高性能 SC | 可选 C/L/cor，native full-CG bridge-U，返回原类模块 |
 | `channel_linear(x, W, bias=None)` | 共享通道 GEMM | `[*,Cin,m]`、`[Cout,Cin]` -> `[*,Cout,m]` |
 | `normalized_silu(x, scale=1.0)` | 融合标量激活与导数 | 计算 `SiLU(x)*scale`，不自行选择模型归一化系数 |
+| `gather_silu_adjoint(d, s, r, grad, src, dst, scale=1.0, needed=(True, True, True))` | 节点/边上下文的联合训练伴随 | `scale*SiLU(d[dst]+s[src]+r)` 的一阶 VJP 与混合二阶导数，保留实时 cotangent；三阶以上使用可微公式，不使用 CUDA Graph |
+| `path_weighted_gates(gates, weight)` | 实时 gate/路径系数乘积 | `[E,D]` 与 D 个系数；联合伴随使用有界归约 partial，避免仅为求和的大乘积 |
+| `path_weighted_linear(features, radial_weight, path_weight)` | 径向输出层与 TP 系数融合 | 将路径系数合入实时 `[D,K]` 权重库后执行 GEMM；全部系数和混合导数保持可学习 |
+| `training_species_channel_linear(x, W, species, bias=None)` | 可学习元素库的原生分组训练核 | 节点只计算自己的 `[S,O,I]` 元素矩阵；原生输入/权重伴随递归覆盖混合高阶导数，无 CUDA Graph |
 | `create_model(...)` | 创建整网演示/新训练模型 | 可选 channels/lmax/edge_lmax/interaction 层数/cor，返回普通 ICTC 模型 |
 | `check_model(model, ...)` | 只读检查整网覆盖 | 返回 `supported` 和 `reasons`，不编译/修改模型 |
 | `configure_model(model, ...)` | 选择整网 eager 执行方案 | 返回选择结果、原因、算子计数和布局 |
@@ -25,6 +35,14 @@
 
 导入 API 不会触发 CUDA 编译。首次实际调用可能生成常量计划并 JIT 编译；冷启动
 耗时不能计作热吞吐。生成源码与编译缓存都要指定到对应远端任务目录。
+联合训练核按实时求导目标和非空 cotangent 元数据专门编译，未请求分支不占用核内
+寄存器；N/E、张量数值及参数仍保持动态。`mixed_threads=0` 为原线程调度，
+32/64/128、`mixed_grouped=True`、`training_csr_splits=2/4/8` 为显式实验选项。
+`mixed_destination=True` 另将输出 cotangent 的 JVP 改为目标节点所有权归约，
+其它混合目标仍使用联合核。这些调度不改变 TP 路径或求导目标，也不启用 CUDA Graph。
+`training_destination_first=1/2/4` 将需要五类输入梯度的一阶伴随改用目标节点
+cotangent 复用与 coalesced partial 归约；0 保留原执行选择。它与显式源节点邻居
+拆分/边核拆分互斥，不影响混合核对实时参数及 cotangent 的依赖。
 GPU HP 使用严格 FP32，没有 TF32/TF32x3 执行选项。配置整网、独立 TP/图消息、
 通道 GEMM 和 SC 配置会将 `torch.set_float32_matmul_precision("highest")`、
 matmul/cuDNN 的 `allow_tf32=False` 固定到进程中，不自动恢复此前设置。
@@ -298,7 +316,7 @@ trainer = ForceTrainer(
 从头训练的命令示例（使用已预处理数据；数据处理也在对应远端任务中运行）：
 
 ```bash
-mff-train --data-dir /task/data --dtype float32 \
+ictc-hp-train --data-dir /task/data --dtype float32 \
   --channels 64 --lmax 3 --max-ell 3 --correlation 3 --num-interaction 3 \
   --route baseline --product-backend ictd-bridge-u --angular-basis ictd \
   --freeze-conv-tp-weight --operator-plan generated --generated-layout packed \
@@ -332,7 +350,7 @@ info = prepare_for_export(model, policy="generated", layout="fused_pack")
 函数只准备模型；正式包、验证与 LAMMPS metadata 用现有导出 CLI：
 
 ```bash
-mff-export-aoti --checkpoint trained_model.pth --elements H,C,O \
+ictc-hp-export-aoti --checkpoint trained_model.pth --elements H,C,O \
   --device cuda --operator-plan generated --generated-layout packed \
   --avg-num-neighbors TRAINING_VALUE --embed-e0 --out /task/model.pt2
 ```
@@ -777,3 +795,37 @@ configure_model(
 
 再次配置而省略此选项，或切换到 `policy="reference"` / 训练配置，会清除
 新的消息布局。参数对象、可训练性和 state_dict keys 保持不变。
+
+## CHORUS 三流高 L 训练原语
+
+`CoherentGraphMessage` 的 `mixed_cache=8/16/32/64` 为目标节点、CG 路径组和通道片
+分配 warp，跨邻居复用三流 cotangent。要求通道数是 32 的倍数。混合伴随按输出磁分量
+立即消费基和切向基，源特征用 FP32 原子累加，边 partial 有唯一写者后归约。
+输入特征、球谐、gate、实/虚相位及 live 输出 cotangent 的全部依赖均保留。
+
+`first_cache=True` 将分量缓存调度用于一阶 VJP；这是独立的实验选项，不自动替换
+现有 destination-first 调度。较大的路径缓存组也不保证更快。
+
+`mixed_fuse_jvp=True` 复用混合 TP 已计算的基和切向消息，在同一目标节点遍历内
+累加输出 cotangent JVP，要求启用 `mixed_cache`。每个输出槽只有一个写者。
+`mixed_grouped=True` 在缓存调度中为各路径组分别实例化原生 kernel，让寄存器
+分配和指令体不再由最宽组统一决定。径向分块也支持组专门化及单遍 JVP，
+分块边界处对同一目标节点的输出采用串行分块累加。
+
+`first_schedule="pruned"/"grouped"/"compact"/"compact_grouped"` 将实际 autograd 目标
+编码为一阶原生核的常量，并可选择路径组专门化和按磁分量立即消费原 CG 列。
+它与旧 `first_cache` 调度互斥，要求 C 为 32 的倍数；`"legacy"` 保留原默认路径。
+显式调度也覆盖不建高阶图的普通 backward 以及 X 固定的调用，不需要额外开启 CSR 调度。
+所有原来的非零 CG 项、实时系数和高阶依赖保持不变。
+
+`radial_training(..., hidden, bank, ..., tile_edges=8192)` 使用实时径向输出 bank：
+前向 gates 只在本次调用中复用，不保存完整一阶 gate cotangent。实例设置
+`radial_cached=True` 后，以有界 GEMM 生成 gate 切向量，接入缓存 TP 混合伴随，
+并立即把每块 gate VJP 投影回隐藏层与 bank。bank、TP 系数和所有混合目标保持可训练；
+更高阶导数使用原可微表达式。CHORUS 接入端负责 live bank 与 TP 系数的结合。
+设置 `radial_first_bounded=True` 后，一阶 gate VJP 同样在 destination CSR 分块中生成，
+立即用严格 FP32 GEMM 投影到隐藏层和 bank，再复用缓冲区。该调度不保存完整 DG，
+并在需要的混合反传中保留 FG/TZ/TB 项，而不是冻结或省略径向权重梯度。
+
+这些原语为 eager CUDA FP32，不依赖外部 TP 库或 CUDA Graph。模块不缓存跨 step 的
+可训练权重乘积，不改变参数身份或 checkpoint schema。

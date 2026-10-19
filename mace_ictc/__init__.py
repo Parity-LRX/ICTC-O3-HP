@@ -7,6 +7,8 @@ is retained for checkpoint compatibility; no O2U1 package is required.
 """
 
 __version__ = "0.2.12"
+# Contract checked by the optional CHORUS execution adapter, without renumbering the paper release.
+__hp_api_version__ = 1
 
 import torch
 if not hasattr(torch, "compiler"):

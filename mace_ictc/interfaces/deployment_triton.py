@@ -98,7 +98,7 @@ def _message_source(p,projection):
     return "\n".join(lines)+"\n"
 
 
-def prepare_message(layer,device):
+def prepare_message(layer,device,*,csr_forward=False):
     from mace_ictc.models.fused_message import _plan,_channel_node,_channel_cotangent,_normal_message_output,_normal_feature_gradient
     from mace_ictc.models.bond_projection import projection_plan
     from torch.library import triton_op,wrap_triton
@@ -108,7 +108,7 @@ def prepare_message(layer,device):
     canonical=p["generated_layout"]=="canonical"
     projection=projection_plan(tp,tp._get_bond_projectors(device,torch.float32),device,torch.float32)
     high=4<=int(layer.tp.lmax)<=5
-    p["deployment_channel_tiles"]=high and p["c"]>=32
+    p["deployment_channel_tiles"]=(high and p["c"]>=32) or (csr_forward and p['c']>=64)
     parts=[]
     if high:
         # Bound compiler/register work by input degree, while retaining the
@@ -127,20 +127,31 @@ def prepare_message(layer,device):
     kernels=[_module(_message_source(part,projection),"message").kernel for part in parts]
     hd=projection["hdim"]
     tiles=triton.cdiv(p["c"],32) if p["deployment_channel_tiles"] else 1
+    csr=None
+    if csr_forward:
+        if canonical:raise ValueError('Prepared CSR forward requires packed feature layout')
+        from .deployment_coherent import prepare_csr_forward
+        csr=prepare_csr_forward(p,projection,1)
 
     @triton_op(_name("message_backward"),mutates_args={})
     def backward_op(x:torch.Tensor,sh:torch.Tensor,w:torch.Tensor,g:torch.Tensor,s:torch.Tensor,d:torch.Tensor,m:torch.Tensor,v:torch.Tensor)->Tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
         e=s.shape[0];xc=x if canonical else _channel_node(x,p);vc=v if canonical else _channel_cotangent(v,p)
-        dx=torch.zeros_like(x);dh=torch.zeros_like(sh) if high else torch.empty_like(sh);dg=torch.empty_like(g)
+        dx=torch.zeros_like(x)
+        dh=torch.zeros_like(sh) if high or p['deployment_channel_tiles'] else torch.empty_like(sh)
+        dg=torch.empty_like(g)
         for kernel in kernels:
             wrap_triton(kernel)[(triton.cdiv(e*32,128),tiles)](xc,sh,w,g,s,d,m,vc,vc,dx,dh,dg,e,1,128,num_warps=4,enable_fp_fusion=True)
         return (dx if canonical else _normal_feature_gradient(dx,p)),dh,dg
 
     @triton_op(_name("message"),mutates_args={})
     def forward_op(x:torch.Tensor,sh:torch.Tensor,w:torch.Tensor,g:torch.Tensor,s:torch.Tensor,d:torch.Tensor,m:torch.Tensor)->torch.Tensor:
-        e=s.shape[0];xc=x if canonical else _channel_node(x,p);out=x.new_zeros(x.shape[0],p["odim"])
-        for kernel in kernels:
-            wrap_triton(kernel)[(triton.cdiv(e*32,128),tiles)](xc,sh,w,g,s,d,m,out,out,xc,sh,g,e,0,128,num_warps=4,enable_fp_fusion=True)
+        e=s.shape[0];xc=x if canonical else _channel_node(x,p)
+        if csr is not None:
+            out=csr(xc,sh,w,g,g,g,s,d,m).reshape(x.shape[0],p['odim'])
+        else:
+            out=x.new_zeros(x.shape[0],p["odim"])
+            for kernel in kernels:
+                wrap_triton(kernel)[(triton.cdiv(e*32,128),tiles)](xc,sh,w,g,s,d,m,out,out,xc,sh,g,e,0,128,num_warps=4,enable_fp_fusion=True)
         return out if canonical else _normal_message_output(out,p)
 
     def setup(ctx,inputs,output):ctx.save_for_backward(*inputs)
@@ -242,9 +253,10 @@ def _prepare_circuit(plan,c,size):
     from torch.library import triton_op,wrap_triton
     import triton
     p=plan["final"]["sizes"][2];m=plan["final"]["sizes"][3]
-    source=_generate(plan["pair"],plan["final"],plan["input_size"])
-    source=source.replace("def circuit(X,A,G,H,HA,Y,N,","def circuit(X,A,G,H,HA,S,Y,N,")
-    source=source.replace("tl.load(A+c*",f"tl.load(A+tl.load(S+n,valid,0).to(tl.int64)*C*{p}+c*")
+    # The circuit generator owns species-bank indexing. Text substitution of
+    # an old A+c* expression silently selected species zero after the generator
+    # introduced weight_base and an explicit IDX argument.
+    source=_generate(plan["pair"],plan["final"],plan["input_size"],species_banked=True)
     kernel=_module(source,"circuit").circuit
 
     @triton_op(_name("contraction_backward"),mutates_args={})

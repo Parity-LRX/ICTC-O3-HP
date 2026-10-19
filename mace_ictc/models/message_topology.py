@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Live device CSR grouping; integer counters, no cached graph or host scalars.
 
-Sorted input is detected on device and keeps identity edge order. Unsorted
-input uses integer atomic placement and does not guarantee stable order within
-a node. Geometry/gates stay in original order; no topology is cached.
+Small graphs use integer atomic placement; sorted input retains identity edge
+order. Large graphs use a stable integer sort to bound FP32 reduction-order
+variation. Geometry/gates stay in original order; no topology is cached.
 """
 import torch
 from .monomial_operator import triton
@@ -33,7 +33,7 @@ if triton is not None:
             tl.store(ORDER+position,i,active)
 
 
-def topology(keys,n,with_order_hint=False):
+def unordered_topology(keys,n,with_order_hint=False):
     if triton is None:raise RuntimeError('Device CSR requires Triton')
     if not keys.is_cuda or keys.dtype!=torch.int64 or keys.ndim!=1:
         raise ValueError('Device CSR requires int64 CUDA node indices')
@@ -53,3 +53,37 @@ def topology(keys,n,with_order_hint=False):
     order=torch.empty_like(keys)
     _place[(triton.cdiv(keys.numel(),256),)](keys,cursor,order,sorted_input,keys.numel(),256,num_warps=4)
     return (ptr,order,sorted_input) if with_order_hint else (ptr,order)
+
+
+def stable_topology(keys,n,with_order_hint=False):
+    """Live fixed-size CSR with original edge order inside every node.
+
+    Fixed-size device counting avoids bincount's host size discovery during a
+    CUDA Graph capture. The integer sort is stable; no geometry is cached.
+    Public topology() selects this builder for E>=327680; callers may also
+    request it explicitly for reduction-order qualification.
+    """
+    if triton is None:raise RuntimeError('Device CSR requires Triton')
+    if not keys.is_cuda or keys.dtype!=torch.int64 or keys.ndim!=1:
+        raise ValueError('Device CSR requires int64 CUDA node indices')
+    if not isinstance(n,int) or isinstance(n,bool) or n<0:
+        raise ValueError('Device CSR requires nonnegative node count')
+    keys=keys.contiguous()
+    if not keys.numel():
+        result=(keys.new_zeros(n+1),keys.new_empty(0))
+        return (*result,keys.new_ones(1)) if with_order_hint else result
+    if n==0:raise ValueError('A nonempty graph requires nodes')
+    counts=keys.new_zeros(n)
+    sorted_input=keys.new_ones(1)
+    _count[(triton.cdiv(keys.numel(),256),)](keys,counts,sorted_input,keys.numel(),256,num_warps=4)
+    ptr=torch.cat((counts.new_zeros(1),counts.cumsum(0)))
+    sort_keys=keys.to(torch.int32) if n<=2147483647 else keys
+    order=torch.argsort(sort_keys,stable=True)
+    return (ptr,order,sorted_input) if with_order_hint else (ptr,order)
+
+
+def topology(keys,n,with_order_hint=False):
+    # Large graphs amplify arbitrary atomic placement order in downstream
+    # FP32 sums. Both routes rebuild live topology; nothing is cached.
+    builder=stable_topology if keys.numel()>=327680 else unordered_topology
+    return builder(keys,n,with_order_hint)

@@ -393,13 +393,15 @@ class GraphMessage(torch.nn.Module):
     evaluation is separate; supply its live external gate output.
     """
     def __init__(self, tp, *, input_lmax, edge_lmax, layout="packed", edge_chunk_size=65536,
-                 reduction="auto",cartesian_schedule="native"):
+                 reduction="auto",cartesian_schedule="native",topology_backend="native"):
         super().__init__()
         _tp_coverage(tp, input_lmax, edge_lmax)
         if layout not in ("packed", "fused_pack",'canonical'):
             raise ValueError("Graph layout must be packed, fused_pack or canonical")
         if reduction not in ("auto","atomic","csr"):
             raise ValueError("Graph reduction must be auto, atomic or csr")
+        if topology_backend not in ("native", "device"):
+            raise ValueError("Topology backend must be native or device")
         if cartesian_schedule!='native':
             raise ValueError('Only the original ICTC basis is supported; the experimental STF-coordinate schedule is retired')
         qualified=max(input_lmax,edge_lmax,tp.lmax)<=3
@@ -410,6 +412,7 @@ class GraphMessage(torch.nn.Module):
         if not isinstance(edge_chunk_size, int) or isinstance(edge_chunk_size, bool) or edge_chunk_size < 1:
             raise ValueError("edge_chunk_size must be a positive integer")
         self._options = {"_generated_forward": True, "_generated_adjoint": True,
+            "_generated_topology": topology_backend,
             "_generated_compact_cartesian":False,
             "_generated_second": True, "_generated_layout": layout,
             "_message_chunk_edges": edge_chunk_size, "_generated_blocks": 0,
@@ -502,7 +505,8 @@ def create_symmetric_contraction(*, num_elements, lmax, target_lmax=None, channe
 
 
 def configure_symmetric_contraction(module, *, policy="auto", high_l_policy="auto", training=False,
-                                    reference_buffer_policy="auto",species_schedule="grouped"):
+                                    reference_buffer_policy="auto",species_schedule="grouped",
+                                    allow_reduced_cg=False):
     """Select factorized SC in place, preserving live weights and checkpoint keys.
 
     Coverage: CUDA FP32, positive channels, correlation 1/2/3, native full CG. Supply
@@ -510,6 +514,10 @@ def configure_symmetric_contraction(module, *, policy="auto", high_l_policy="aut
     calls with only node_attrs retain the established route.
     High-L cubic auto residency keeps immutable dense U on CPU after planning;
     reference_buffer_policy=device keeps them on the parameter device.
+    allow_reduced_cg explicitly accepts an existing checkpoint's reduced U
+    buffers. It does not generate a basis with cuEq or change learned weights:
+    the native factorizer must reconstruct their actual symmetric polynomial
+    within its existing precision budget before executing a generated circuit.
     """
     from mace_ictc.models.fp32_policy import strict_fp32
     strict_fp32()
@@ -523,11 +531,13 @@ def configure_symmetric_contraction(module, *, policy="auto", high_l_policy="aut
     if species_schedule not in ('grouped','indexed'):
         raise ValueError('species_schedule must be grouped or indexed')
     if not isinstance(training,bool):raise TypeError("training must be a boolean")
+    if not isinstance(allow_reduced_cg,bool):raise TypeError("allow_reduced_cg must be a boolean")
     if reference_buffer_policy not in ('auto','device'):
         raise ValueError('reference_buffer_policy must be auto or device')
     from mace_ictc.models.reference_u_residency import host_reference_unavailable,restore_reference_u
     parameter = next(module.parameters())
-    supported = (parameter.is_cuda and parameter.dtype == torch.float32 and module.channels > 0 and not module.use_reduced_cg
+    supported = (parameter.is_cuda and parameter.dtype == torch.float32 and module.channels > 0
+                 and (not module.use_reduced_cg or allow_reduced_cg)
                  and module.lmax >= 0 and module.target_lmax >= 0
                  and all(c.correlation in (1,2,3) for c in module.symmetric_contractions.contractions))
     if policy == "generated" and not supported:
@@ -558,10 +568,36 @@ def configure_symmetric_contraction(module, *, policy="auto", high_l_policy="aut
             "high_l_policy":high_l_policy,
             "species_schedule":species_schedule,"indexed_species_active":module._species_circuit,
             "reference_buffer_policy":reference_buffer_policy,
+            "checkpoint_reduced_cg":bool(module.use_reduced_cg and allow_reduced_cg),
             "sc_schedule":"sparse" if supported and policy!="reference" and not module._factorized_circuit else
                 "partitioned" if supported and policy!="reference" and module._partitioned_circuit else
                 "circuit" if supported and policy!="reference" else "reference",
             "reasons": [] if supported or policy == "reference" else ["outside qualified standalone SC coverage"]}
+
+
+def species_channel_linear(features, weight, species, bias=None):
+    """Native species-bank GEMMs, without per-node weight replication.
+
+    features [N,Cin,m], weight [S,Cout,Cin], fixed int64 species [N].
+    Frozen inference banks use live device grouping and indexed IEEE-FP32
+    GEMMs. Trainable banks keep ordinary Torch parameter/mixed gradients.
+    """
+    from mace_ictc.models.fp32_policy import strict_fp32
+    from mace_ictc.models.species_linear import shared_species_linear, supported
+    strict_fp32()
+    if features.ndim != 3 or weight.ndim != 3 or features.shape[1] != weight.shape[2]:
+        raise ValueError("Expected features [N,Cin,m] and weight [S,Cout,Cin]")
+    if not supported(features, weight):
+        raise ValueError("Species GEMM requires CUDA FP32 and a bank of 1 to 4 species")
+    if species.dtype != torch.int64 or species.device != features.device or species.shape != (features.shape[0],):
+        raise ValueError("Species must be a fixed int64 [N] CUDA vector")
+    if bias is not None and (bias.shape != weight.shape[:2] or bias.device != weight.device
+                             or bias.dtype != weight.dtype or features.shape[-1] != 1):
+        raise ValueError("Bias requires a scalar block and a matching [S,Cout] bank")
+    if not weight.requires_grad and (bias is None or not bias.requires_grad):
+        from ._species_gemm import grouped_species_linear
+        return grouped_species_linear(features, weight, species, bias)
+    return shared_species_linear(features, weight, species, bias)
 
 
 def channel_linear(features, weight, bias=None):
@@ -592,3 +628,55 @@ def normalized_silu(features, scale=1.0):
         raise TypeError("scale must be a fixed numeric scalar")
     from mace_ictc.models.fused_activation import normalized_silu as implementation
     return implementation(features, float(scale))
+
+
+def gather_silu_adjoint(destination, source, radial, grad, src, dst, scale=1.0,
+                        needed=(True, True, True)):
+    """Live gather/normalized-SiLU VJP and mixed second derivative for training."""
+    from ._context_activation import gather_silu_adjoint as implementation
+    return implementation(destination, source, radial, grad, src, dst, scale, needed)
+
+
+def path_weighted_gates(gates, weight):
+    """Live [E,D] gate/path product with fused bounded mixed adjoints."""
+    if not gates.is_cuda:
+        if gates.ndim != 2 or gates.shape[1] != weight.numel():
+            raise ValueError("Expected gates [E,D] and D path coefficients")
+        return gates*weight.reshape(-1)
+    from ._gate_coefficients import path_weighted_gates as implementation
+    return implementation(gates, weight)
+
+
+def path_weighted_linear(features, radial_weight, path_weight):
+    """Live radial output GEMM with path coefficients folded into its bank.
+
+    Computes linear(features, radial_weight * path_weight[:,None]). Both banks
+    remain trainable, including zero path coefficients. Moving the broadcast
+    product from E*D activations to D*K weights avoids wide edge temporaries.
+    """
+    if (features.ndim != 2 or radial_weight.ndim != 2
+            or features.shape[1] != radial_weight.shape[1]
+            or path_weight.numel() != radial_weight.shape[0]):
+        raise ValueError("Expected features [E,K], radial bank [D,K] and D path coefficients")
+    if any(value.device != features.device or value.dtype != features.dtype
+           for value in (radial_weight, path_weight)):
+        raise ValueError("Radial features and both coefficient banks must share dtype/device")
+    return torch.nn.functional.linear(features, radial_weight*path_weight.reshape(-1, 1))
+
+
+def training_species_channel_linear(features, weight, species, bias=None):
+    """Native live-bank species GEMM, including recursive weight/mixed VJPs."""
+    # Reuse the public checked schema and original path outside native coverage.
+    from mace_ictc.models.species_linear import supported
+    if not supported(features, weight) or torch.compiler.is_compiling():
+        from mace_ictc.models.species_linear import shared_species_linear
+        return shared_species_linear(features, weight, species, bias)
+    if (features.ndim != 3 or weight.ndim != 3 or features.shape[1] != weight.shape[2]
+            or species.dtype != torch.int64 or species.device != features.device
+            or species.shape != (features.shape[0],)):
+        raise ValueError("Expected features [N,I,M], bank [S,O,I] and int64 species [N]")
+    if bias is not None and (bias.shape != weight.shape[:2] or bias.device != weight.device
+                             or bias.dtype != weight.dtype or features.shape[-1] != 1):
+        raise ValueError("Bias requires a scalar block and matching [S,O] bank")
+    from ._species_training import training_species_linear
+    return training_species_linear(features, weight, species, bias)

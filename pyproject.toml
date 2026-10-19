@@ -17,11 +17,11 @@ train = ["h5py", "pandas", "scipy"]
 conversion = ["mace-torch>=0.3.16"]
 
 [project.scripts]
-mff-train = "mace_ictc.cli.train:main"
-mff-export-aoti = "mace_ictc.cli.export_aoti_core:main"
-mff-export-core = "mace_ictc.cli.export_libtorch_core:main"
-mff-convert-mace = "mace_ictc.cli.convert_mace:main"
-mff-preprocess = "mace_ictc.cli.preprocess:main"
+ictc-hp-train = "mace_ictc.cli.train:main"
+ictc-hp-export-aoti = "mace_ictc.cli.export_aoti_core:main"
+ictc-hp-export-core = "mace_ictc.cli.export_libtorch_core:main"
+ictc-hp-convert-mace = "mace_ictc.cli.convert_mace:main"
+ictc-hp-preprocess = "mace_ictc.cli.preprocess:main"
 
 [tool.setuptools]
 license-files = ["LICENSE", "LICENSES/*.txt", "NOTICE", "LICENSE_SCOPE.md", "COMMERCIAL_LICENSE.md"]

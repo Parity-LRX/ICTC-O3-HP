@@ -32,6 +32,22 @@ GPU operations, compilation, and examples should run on an allocated compute
 device. On Slurm clusters, submit them through `sbatch` rather than running
 them on a login node.
 
+### CHORUS compatibility
+
+The paper's package version remains 0.2.12. This HP source revision provides
+HP API contract 1 for CHORUS, whose package version also remains 0.1.0.
+CHORUS's `hp` extra pins an immutable Git revision of this repository, rather
+than relying on the shared version number to distinguish old/new operators.
+Its ordinary installation and reference execution do not require this library.
+Installing CHORUS with `[hp]` fetches the matching revision automatically.
+
+This HP revision uses `ictc-hp-train`, `ictc-hp-export-aoti`,
+`ictc-hp-export-core`, `ictc-hp-convert-mace`, and `ictc-hp-preprocess` instead
+of the old `mff-*` command names. This avoids overwriting CHORUS console scripts
+when both packages share an environment. Python imports and checkpoint class
+paths remain `mace_ictc`. Existing shell scripts should use the new command
+prefix or `python -m mace_ictc.cli.<module>`.
+
 ## Quick start
 
 ```python
