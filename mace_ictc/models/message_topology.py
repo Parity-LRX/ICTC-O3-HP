@@ -83,7 +83,6 @@ def stable_topology(keys,n,with_order_hint=False):
 
 
 def topology(keys,n,with_order_hint=False):
-    # Large graphs amplify arbitrary atomic placement order in downstream
-    # FP32 sums. Both routes rebuild live topology; nothing is cached.
-    builder=stable_topology if keys.numel()>=327680 else unordered_topology
-    return builder(keys,n,with_order_hint)
+    # Stable within-node order bounds FP32 variation in first/mixed adjoints
+    # at every graph size. Grouping is rebuilt; geometry is never cached.
+    return stable_topology(keys,n,with_order_hint)

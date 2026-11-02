@@ -35,7 +35,7 @@ them on a login node.
 ### CHORUS compatibility
 
 The paper's package version remains 0.2.12. This HP source revision provides
-HP API contract 1 for CHORUS, whose package version also remains 0.1.0.
+HP API contract 2 for CHORUS, whose package version also remains 0.1.0.
 CHORUS's `hp` extra pins an immutable Git revision of this repository, rather
 than relying on the shared version number to distinguish old/new operators.
 Its ordinary installation and reference execution do not require this library.

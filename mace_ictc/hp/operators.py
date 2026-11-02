@@ -579,25 +579,14 @@ def species_channel_linear(features, weight, species, bias=None):
     """Native species-bank GEMMs, without per-node weight replication.
 
     features [N,Cin,m], weight [S,Cout,Cin], fixed int64 species [N].
-    Frozen inference banks use live device grouping and indexed IEEE-FP32
-    GEMMs. Trainable banks keep ordinary Torch parameter/mixed gradients.
+    Any positive bank size is accepted. Frozen banks use stable device grouping;
+    learned banks retain ordinary differentiable GEMMs. Native live-bank
+    mixed adjoints are exposed by training_species_channel_linear.
     """
     from mace_ictc.models.fp32_policy import strict_fp32
-    from mace_ictc.models.species_linear import shared_species_linear, supported
+    from ._species import species_linear
     strict_fp32()
-    if features.ndim != 3 or weight.ndim != 3 or features.shape[1] != weight.shape[2]:
-        raise ValueError("Expected features [N,Cin,m] and weight [S,Cout,Cin]")
-    if not supported(features, weight):
-        raise ValueError("Species GEMM requires CUDA FP32 and a bank of 1 to 4 species")
-    if species.dtype != torch.int64 or species.device != features.device or species.shape != (features.shape[0],):
-        raise ValueError("Species must be a fixed int64 [N] CUDA vector")
-    if bias is not None and (bias.shape != weight.shape[:2] or bias.device != weight.device
-                             or bias.dtype != weight.dtype or features.shape[-1] != 1):
-        raise ValueError("Bias requires a scalar block and a matching [S,Cout] bank")
-    if not weight.requires_grad and (bias is None or not bias.requires_grad):
-        from ._species_gemm import grouped_species_linear
-        return grouped_species_linear(features, weight, species, bias)
-    return shared_species_linear(features, weight, species, bias)
+    return species_linear(features, weight, species, bias, native_training=False)
 
 
 def channel_linear(features, weight, bias=None):
@@ -666,17 +655,10 @@ def path_weighted_linear(features, radial_weight, path_weight):
 
 def training_species_channel_linear(features, weight, species, bias=None):
     """Native live-bank species GEMM, including recursive weight/mixed VJPs."""
-    # Reuse the public checked schema and original path outside native coverage.
-    from mace_ictc.models.species_linear import supported
+    from mace_ictc.models.species_linear import supported, shared_species_linear
     if not supported(features, weight) or torch.compiler.is_compiling():
-        from mace_ictc.models.species_linear import shared_species_linear
         return shared_species_linear(features, weight, species, bias)
-    if (features.ndim != 3 or weight.ndim != 3 or features.shape[1] != weight.shape[2]
-            or species.dtype != torch.int64 or species.device != features.device
-            or species.shape != (features.shape[0],)):
-        raise ValueError("Expected features [N,I,M], bank [S,O,I] and int64 species [N]")
-    if bias is not None and (bias.shape != weight.shape[:2] or bias.device != weight.device
-                             or bias.dtype != weight.dtype or features.shape[-1] != 1):
-        raise ValueError("Bias requires a scalar block and matching [S,O] bank")
-    from ._species_training import training_species_linear
-    return training_species_linear(features, weight, species, bias)
+    from mace_ictc.models.fp32_policy import strict_fp32
+    from ._species import species_linear
+    strict_fp32()
+    return species_linear(features, weight, species, bias)

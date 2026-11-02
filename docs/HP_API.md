@@ -5,11 +5,18 @@
 性能对照、测试与验证资料由维护者本地保存，不包含在交付源码和安装包中。
 
 论文对应的 package 版本号保持 0.2.12，不因本轮优化而改号。本轮提供 CHORUS
-所需的 HP API contract 1；CHORUS 的 `[hp]` extra 精确锁定对应 Git 提交，
+所需的 HP API contract 2；CHORUS 的 `[hp]` extra 精确锁定对应 Git 提交，
 而不是仅靠相同版本号区分新旧实现。distribution 名为 `ictc-o3-hp`，导入 namespace
 仍为 `mace_ictc`。为避免双包安装时命令互相覆盖，CLI 统一使用 `ictc-hp-*` 前缀。
 
 ## API 一览
+
+元素线性融合现支持任意正整数 `S`，不再限制为四种元素。CUDA FP32 eager 使用
+稳定的实时整数分组和 indexed GEMM，不展开 `[N,O,I]` 节点权重；输入、可训练
+权重、bias 以及力损失的混合/高阶导数保持可微。空输入和缺席元素的梯度定义保持。
+`configure_model` 的原版 MACE 入口也会为大于四元素的模型默认启用该路径，
+`wide_channel_policy="off"` 可保留原执行计划。分组不缓存原子/halo 身份。
+compiled 路径和非原生覆盖继续使用普通 PyTorch 公式；不据此宣称其性能已验证。
 
 | API | 用途 | 输入 / 输出要点 |
 |---|---|---|

@@ -119,7 +119,7 @@ def configure_mace_runtime_plan(model: torch.nn.Module, *, policy: str = "auto",
         factorized_circuit=True, streamed_gates=True, generated_message=True,
         generated_second=True, fused_harmonics=True, fold_frozen_path_weights=True,
         shared_channel_gemm=not training, edge_chunk_size=65536 if training else 262144,
-        shared_species_gemm=wide and core.num_elements<=4,
+        shared_species_gemm=wide or (wide_channel_policy=="auto" and core.num_elements>4),
         generated_csr_forward="auto" if wide else False,
         gate_cache_bytes=gate_cache_bytes, generated_layout=generated_layout,
     )
