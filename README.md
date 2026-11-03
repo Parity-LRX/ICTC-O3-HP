@@ -35,7 +35,7 @@ them on a login node.
 ### CHORUS compatibility
 
 The paper's package version remains 0.2.12. This HP source revision provides
-HP API contract 2 for CHORUS, whose package version also remains 0.1.0.
+HP API contract 3 for CHORUS, whose package version also remains 0.1.0.
 CHORUS's `hp` extra pins an immutable Git revision of this repository, rather
 than relying on the shared version number to distinguish old/new operators.
 Its ordinary installation and reference execution do not require this library.
@@ -120,6 +120,13 @@ configuration requires `0 <= lmax <= edge_lmax`. Qualified coverage includes
 correlation orders 2 and 3, with order 1 supported for compatibility.
 Structural support does not imply that every architecture has been validated
 or that every schedule improves both speed and memory.
+
+The coherent cached mixed adjoint accepts arbitrary positive channel counts,
+including partial warp tiles, and any positive phase-head count dividing the
+channels. Coherent CG programs are generated from the actual paths rather than
+an L3 preset. Cached live/frozen radial projections accept any positive hidden
+width. These operators are selected independently by the CHORUS adapter; their
+availability does not change a model's rank, dtype or parameter trainability.
 
 Current policies include shared element/channel GEMMs, destination-node
 aggregation, native geometry schedules, bounded high-angular-order

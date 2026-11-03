@@ -505,10 +505,8 @@ class CoherentGraphMessage(torch.nn.Module):
                  training_destination_first=0, mixed_compact=False, mixed_cache=0, first_cache=False,
                  mixed_fuse_jvp=False, first_schedule='legacy'):
         super().__init__()
-        if not isinstance(heads, int) or not 1 <= heads <= 4 or tp.channels % heads:
-            raise ValueError("Coherent graph heads must divide channels and lie in 1..4")
-        if max(input_lmax, edge_lmax, tp.lmax) > 3:
-            raise ValueError("Coherent graph schedule currently supports L<=3")
+        if not isinstance(heads, int) or isinstance(heads, bool) or heads < 1 or tp.channels % heads:
+            raise ValueError("Coherent graph heads must be positive and divide channels")
         self.edge = EdgeTensorProduct(tp, input_lmax=input_lmax, edge_lmax=edge_lmax, layout="ir_mul")
         self.heads, self.angular = heads, bool(angular)
         self.output_lmax = max(path[2] for path in tp.paths)
@@ -532,8 +530,6 @@ class CoherentGraphMessage(torch.nn.Module):
         self.mixed_compact = mixed_compact
         if isinstance(mixed_cache, bool) or mixed_cache not in (0, 8, 16, 32, 64):
             raise ValueError('mixed_cache must be 0 (off), 8, 16, 32 or 64 components')
-        if mixed_cache and tp.channels % 32:
-            raise ValueError('Destination-cached mixed adjoint requires channel multiples of 32')
         self.mixed_cache = mixed_cache
         if not isinstance(mixed_fuse_jvp, bool):
             raise TypeError('mixed_fuse_jvp must be a boolean')

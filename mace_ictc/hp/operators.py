@@ -607,7 +607,7 @@ def channel_linear(features, weight, bias=None):
         if bias.shape != (weight.shape[0],) or bias.device != weight.device or bias.dtype != weight.dtype:
             raise ValueError("bias must match output channel count, device and dtype")
     angular = features.movedim(-2, -1).contiguous()
-    output = torch.nn.functional.linear(angular.reshape(-1, weight.shape[1]), weight, bias)
+    output = torch.nn.functional.linear(angular.flatten(0, -2), weight, bias)
     return output.reshape(*angular.shape[:-1], weight.shape[0]).movedim(-1, -2)
 
 

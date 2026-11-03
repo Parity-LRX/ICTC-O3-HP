@@ -16,7 +16,7 @@ def shared_species_linear(block, weight, index, bias=None, *, native=True):
         return species_linear(block, weight, index, bias)
     torch._assert_async(((index>=0)&(index<weight.shape[0])).all(),"Species index outside the weight bank")
     angular=block.movedim(-2,-1).contiguous()
-    flat=angular.reshape(-1,angular.shape[-1])
+    flat=angular.reshape(block.shape[0]*block.shape[-1],angular.shape[-1])
     result=None
     for species in range(weight.shape[0]):
         value=F.linear(flat,weight[species],None if bias is None else bias[species])

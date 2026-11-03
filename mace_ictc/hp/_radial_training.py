@@ -241,8 +241,8 @@ def radial_training(owner, blocks, harmonics, hidden, bank, src, dst, mask, real
     if not isinstance(tile_edges, int) or isinstance(tile_edges, bool) or tile_edges < 1:
         raise ValueError("Live radial training tile_edges must be positive")
     sample = owner.edge.tp.weight
-    if bank.ndim != 2 or not 1 <= bank.shape[1] <= 128:
-        raise ValueError("Live radial bank requires 1..128 input channels")
+    if bank.ndim != 2 or bank.shape[1] < 1:
+        raise ValueError("Live radial bank requires a positive input width")
     e = src.numel()
     _operand(bank, (owner.edge.gate_width, bank.shape[1]), sample, "live radial bank")
     _operand(hidden, (e, bank.shape[1]), sample, "live radial hidden")
@@ -269,8 +269,6 @@ def radial_training(owner, blocks, harmonics, hidden, bank, src, dst, mask, real
     p["radial_first_bounded"] = getattr(owner, "radial_first_bounded", False)
     p["mixed_fuse_jvp"] = owner.mixed_fuse_jvp
     if p["radial_cached"]:
-        if p["c"] % 32:
-            raise ValueError("Cached live radial training requires channel multiples of 32")
         p["mixed_cache"] = owner.mixed_cache or 16
     x = owner.edge.pack_input(blocks)
     sh = torch.cat([harmonics[l].squeeze(-2) for l in projection["keys"]], -1).contiguous()

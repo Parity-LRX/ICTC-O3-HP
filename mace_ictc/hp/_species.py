@@ -16,6 +16,9 @@ def species_linear(features, weight, species, bias=None, *, native_training=True
     if bias is not None and (bias.shape != weight.shape[:2] or bias.device != weight.device
             or bias.dtype != weight.dtype or features.shape[-1] != 1):
         raise ValueError('Bias requires scalar features and a matching [S,O] bank')
+    if not weight.shape[1] or not weight.shape[2]:
+        from mace_ictc.models.species_linear import shared_species_linear
+        return shared_species_linear(features, weight, species, bias, native=False)
     if not native_training and (weight.requires_grad or (bias is not None and bias.requires_grad)):
         from mace_ictc.models.species_linear import shared_species_linear
         return shared_species_linear(features, weight, species, bias, native=False)

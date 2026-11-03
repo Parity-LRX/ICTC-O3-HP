@@ -152,8 +152,8 @@ def radial_coherent(owner, blocks, harmonics, hidden, weight, src, dst, mask, re
     """Frozen bias-free radial output linear, original first/mixed derivatives."""
     from .operators import _eager, _operand
     _eager(blocks[0])
-    if weight.requires_grad or weight.ndim != 2 or not 1 <= weight.shape[1] <= 128:
-        raise ValueError("Radial TP fusion requires a frozen FP32 bank with 1..128 inputs")
+    if weight.requires_grad or weight.ndim != 2 or weight.shape[1] < 1:
+        raise ValueError("Radial TP fusion requires a frozen FP32 bank with positive input width")
     if not isinstance(tile_edges, int) or isinstance(tile_edges, bool) or tile_edges < 1:
         raise ValueError("Radial TP tile_edges must be a positive integer")
     e = src.numel()

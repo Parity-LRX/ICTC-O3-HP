@@ -5,7 +5,7 @@
 性能对照、测试与验证资料由维护者本地保存，不包含在交付源码和安装包中。
 
 论文对应的 package 版本号保持 0.2.12，不因本轮优化而改号。本轮提供 CHORUS
-所需的 HP API contract 2；CHORUS 的 `[hp]` extra 精确锁定对应 Git 提交，
+所需的 HP API contract 3；CHORUS 的 `[hp]` extra 精确锁定对应 Git 提交，
 而不是仅靠相同版本号区分新旧实现。distribution 名为 `ictc-o3-hp`，导入 namespace
 仍为 `mace_ictc`。为避免双包安装时命令互相覆盖，CLI 统一使用 `ictc-hp-*` 前缀。
 
@@ -404,7 +404,7 @@ print(info["selected"], info["counts"])
 |---|---|
 | TP、消息与径向网络 | 启用生成消息、实时门控与径向重算，保留真实 gather/scatter 和力导数 |
 | SC | cor2 使用电路；L4/5 训练及 L5 尾部通道推理按 degree 拆分；cor3 在 L4/5 使用有界稀疏耦合 |
-| 通道与元素矩阵 | 推理使用共享通道 GEMM；C>=96、hidden/edge L<=3、元素数<=4 时启用共享元素 GEMM |
+| 通道与元素矩阵 | 推理使用共享通道 GEMM；C>=96、hidden/edge L<=3 或元素数>4 时启用共享元素 GEMM |
 | 节点聚合 | C>=96、hidden/edge L<=3 且 E>=4096、平均入度>=16 时选择 CSR 前向 |
 | 高阶 TP | L4/5、C>=64 时流式几何计算；按训推阶段和设备选择通道分块，详见下文 |
 | 精度与参数 | 始终严格 FP32、TF32 关闭；SC、径向和线性权重实时参与计算与求导 |
@@ -413,10 +413,10 @@ print(info["selected"], info["counts"])
 统一入口会选择适用路径。启用一组策略不能保证每个架构都同时降低延迟和显存。
 
 对 C>=96 且 hidden/edge L<=3 的整网默认启用两项优化：
-元素数<=4 时，按元素共享 GEMM，避免 `[N,C,C]` 权重复制及其梯度 scatter；
-大且较密的图使用上文的 CSR 前向。元素银行、径向、通道与 SC 权重仍可训练。
-较低通道仍保留原宽通道调度，interaction 层数和 cor=2/3 的选择仍独立。
-`wide_channel_policy="off"` 关闭这两项宽通道优化，保留其他 HP 算子：
+按元素共享 GEMM，避免 `[N,C,C]` 权重复制及其梯度 scatter；
+大且较密的图使用上文的 CSR 前向。大于四元素也可独立启用共享元素 GEMM。
+元素银行、径向、通道与 SC 权重仍可训练，interaction 深度独立。
+`wide_channel_policy="off"` 关闭这两项策略，保留其他 HP 算子：
 
 ```python
 configure_model(model, training=True, policy="generated", wide_channel_policy="auto")

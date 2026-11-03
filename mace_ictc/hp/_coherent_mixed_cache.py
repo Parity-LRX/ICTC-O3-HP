@@ -37,7 +37,7 @@ def _groups(p):
 
 def _specialize_groups(code, p):
     """Independent register allocation for each exact input/path group."""
-    tiles, groups = p['c']//32, len(_groups(p))
+    tiles, groups = (p['c']+31)//32, len(_groups(p))
     slots = tiles*groups
     replacements = (
         ('__global__ void coherent_cached_mixed_kernel', 'template<int GROUP>\n__global__ void coherent_cached_mixed_kernel'),
@@ -62,7 +62,14 @@ def _source(p, projection, dependencies):
     from ._coherent_training import _compact_path
     c, hd, phases = p["c"], projection["hdim"], p["phase_count"]
     outputs, columns, groups = _outputs(p), _columns(p, projection), _groups(p)
-    tiles, slots = c//32, c//32*len(groups)
+    tiles = (c+31)//32
+    slots = tiles*len(groups)
+    # Keep every lane in the warp reductions. Tail lanes read a valid channel,
+    # suppress their writes, and contribute zero to harmonic/phase reductions.
+    channel = (f"const int tile=task%{tiles},logical_channel=tile*32+lane;\n"
+               f" const bool valid=logical_channel<{c};\n"
+               " const int channel=valid?logical_channel:0;" if c%32 else
+               f"const int tile=task%{tiles},channel=tile*32+lane;")
     fuse_jvp = bool(p.get("mixed_fuse_jvp", False))
     flags = ("hx", "hh", "hg", "hr", "hi", "needx", "needh", "needg", "needr", "needi")
     if fuse_jvp:
@@ -84,7 +91,7 @@ __global__ void coherent_cached_mixed_kernel(const float* X,const float* H,const
  const int lane=threadIdx.x%32;
  const int64_t task=(static_cast<int64_t>(blockIdx.x)*blockDim.x+threadIdx.x)/32;
  if(task>=N*{slots})return;
- const int tile=task%{tiles},channel=tile*32+lane;
+ {channel}
  const int group=(task/{tiles})%{len(groups)};
  const int64_t dst=task/{slots};
  const int head=channel/{c//p['phase_heads']};
@@ -123,6 +130,8 @@ __global__ void coherent_cached_mixed_kernel(const float* X,const float* H,const
                 f"const float scale=W[{path*c}+channel]*mask;"]
             body = "\n".join(_compact_path({**p, "_compact_path": path}, columns, ni, bb, bs,
                 degree, (ob-base)//m, width, m, phase))
+            if c%32:
+                body = body.replace('if(needg)DG[', 'if(needg&&valid)DG[')
             if p.get("cache_first", False):
                 # With TG=G and all other tangents zero, the X/H/phase mixed
                 # targets equal the first VJP. Its gate target is u*vef, not
@@ -143,10 +152,13 @@ __global__ void coherent_cached_mixed_kernel(const float* X,const float* H,const
                         body = body.replace(marker, f"y{path}_{mag}_{stream}+=scale*({value});")
             lines += [body, "}"]
         for j in range(ni):
-            lines.append(f"if(needx)atomicAdd(DX+src*{p['xdim']}+{xb+j*c}+channel,dx{j});")
+            condition = 'needx&&valid' if c%32 else 'needx'
+            lines.append(f"if({condition})atomicAdd(DX+src*{p['xdim']}+{xb+j*c}+channel,dx{j});")
         for name, target, width, count, need in (("dh", "PH", hd, hd, "needh"),
                 ("dr", "PR", phases, phases, "needr"), ("di", "PI", phases, phases, "needi")):
             for index in range(count):
+                if c%32:
+                    lines.append(f'if(!valid){name}{index}=0.f;')
                 lines += [f"if({need}){{for(int d=16;d>0;d/=2){name}{index}+=__shfl_down_sync(0xffffffff,{name}{index},d);",
                     f"if(lane==0){target}[(e*{slots}+{number*tiles}+tile)*{width}+{index}]={name}{index};}}"]
         lines.append("}")
@@ -157,7 +169,8 @@ __global__ void coherent_cached_mixed_kernel(const float* X,const float* H,const
                 for mag in range(m):
                     offset = mag*(width//m)+(ob-base)//m
                     for stream in range(3):
-                        lines.append(f"if(needy)DY{degree}[(dst*3+{stream})*{width}+{offset}+channel]=y{path}_{mag}_{stream};")
+                        condition = 'needy&&valid' if c%32 else 'needy'
+                        lines.append(f"if({condition})DY{degree}[(dst*3+{stream})*{width}+{offset}+channel]=y{path}_{mag}_{stream};")
         lines.append("}")
     lines += ["}", f"""
 __global__ void coherent_cached_mixed_reduce(const float* PH,const float* PR,const float* PI,
@@ -249,7 +262,7 @@ def mixed(x, sh, w, gates, r, i, src, dst, mask, p, projection, needs, grads, in
     empty = x.new_empty(0)
     result = tuple((torch.zeros_like(value) if index == 0 else torch.empty_like(value)) if need else empty
                    for index, (value, need) in enumerate(zip((x, sh, gates, r, i), needs[:5])))
-    slots = len(_groups(p))*(p["c"]//32)
+    slots = len(_groups(p))*((p["c"]+31)//32)
     partial = tuple(value.new_empty(value.shape[0], slots, *value.shape[1:]) if need else empty
                     for value, need in zip((sh, r, i), (needs[1], needs[3], needs[4])))
     physical = _physical_gradients(x, p, grads)

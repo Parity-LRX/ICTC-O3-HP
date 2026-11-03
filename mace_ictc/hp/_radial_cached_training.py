@@ -47,7 +47,7 @@ def _extension(p, projection, dependencies, first_gate=False, jvp=False):
     else:
         from ._coherent_mixed_cache import _source, _groups, _specialize_groups
         code = _source(p, projection, dependencies)
-        slots = len(_groups(p))*(p["c"]//32)
+        slots = len(_groups(p))*((p["c"]+31)//32)
         marker = f"const int64_t dst=task/{slots};"
         code = _once(code, marker, marker+"\nconst int64_t edge_lo=PTR[dst]>BEGIN?PTR[dst]:BEGIN;"
             "const int64_t edge_hi=PTR[dst+1]<END?PTR[dst+1]:END;if(edge_lo>=edge_hi)return;")
@@ -69,8 +69,9 @@ def _extension(p, projection, dependencies, first_gate=False, jvp=False):
         if first_gate:
             code = code.replace("float dg_path=0.f,dr_path=0.f,di_path=0.f;", "float fg_path=0.f,dg_path=0.f,dr_path=0.f,di_path=0.f;")
             code = code.replace("dg_path+=tu*vef+u*tv;", "dg_path+=tu*vef+u*tv;fg_path+=u*vef;")
-            pattern = rf"(if\(needg\)DG\[\(index-BEGIN\)\*{width}\+(\d+)\+channel\]=scale\*dg_path;)"
+            pattern = rf"(if\(needg(?:&&valid)?\)DG\[\(index-BEGIN\)\*{width}\+(\d+)\+channel\]=scale\*dg_path;)"
             code, count = re.subn(pattern, lambda match: match[1]+
+                ('if(valid)' if p['c']%32 else '')+
                 f"FG[(index-BEGIN)*{width}+{match[2]}+channel]=scale*fg_path;", code)
             if count != p["p"]:
                 raise RuntimeError("Missing bounded first gate VJP")
@@ -126,7 +127,7 @@ def mixed(x, sh, z, bank, r, i, gates, w, src, dst, mask, p, projection, needs, 
     tile = min(tile_edges, max(1, src.numel()))
     dg = z.new_empty(tile, bank.shape[0]) if need_gate else empty
     fg = z.new_empty(tile, bank.shape[0]) if first_gate else empty
-    slots = len(_groups(p))*(p["c"]//32)
+    slots = len(_groups(p))*((p["c"]+31)//32)
     partial = tuple(value.new_empty(tile, slots, *value.shape[1:]) if need else empty
         for value, need in zip((sh, r, i), (needs[1], needs[4], needs[5])))
     mixed_extension = _extension(p, projection, flags, first_gate)
